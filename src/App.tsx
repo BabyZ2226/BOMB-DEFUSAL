@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, ChangeEvent } from 'react';
 import { db } from './firebase';
 import { doc, setDoc, updateDoc, onSnapshot, getDoc, deleteField } from 'firebase/firestore';
 import { motion, AnimatePresence } from 'motion/react';
@@ -38,10 +38,20 @@ const MORSE_WORDS = [
   { word: 'STOP', freq: '3.565', code: '... - --- .--.' },
 ];
 
+
+const PASSWORD_WORDS = ['SOL', 'LUN', 'MAR', 'REY', 'LUZ', 'PAZ', 'FIN', 'SUR'];
+const BUTTON_COLORS = [
+  { name: 'Rojo', class: 'bg-red-600' },
+  { name: 'Azul', class: 'bg-blue-600' },
+  { name: 'Blanco', class: 'bg-zinc-100' },
+  { name: 'Amarillo', class: 'bg-yellow-400' }
+];
+const BUTTON_TEXTS = ['ABORTAR', 'DETONAR', 'MANTENER'];
+
 export default function App() {
   const [gameMode, setGameMode] = useState<'menu' | 'single' | 'coop' | 'squad' | 'squad_online' | 'coop_online'>('menu');
   const [difficulty, setDifficulty] = useState<'easy' | 'medium' | 'hard'>('easy');
-  const [coopRole, setCoopRole] = useState<'technician' | 'expert' | 'expert_alpha' | 'expert_beta' | 'expert_gamma'>('technician');
+  const [coopRole, setCoopRole] = useState<'alpha' | 'beta' | 'gamma' | 'delta'>('alpha');
   const [serialNumber, setSerialNumber] = useState('');
   const [wires, setWires] = useState<{ id: number; color: string; class: string; cut: boolean }[]>([]);
   const [keypad, setKeypad] = useState<{ symbol: string; pressed: boolean; priority: number }[]>([]);
@@ -54,11 +64,25 @@ export default function App() {
   const [currentMorseFreqIdx, setCurrentMorseFreqIdx] = useState(0);
   const [freqTarget, setFreqTarget] = useState(100.0);
   const [freqCurrent, setFreqCurrent] = useState(90.0);
+
+  const [switchesState, setSwitchesState] = useState<boolean[]>([false, false, false, false, false]);
+  const [switchesTarget, setSwitchesTarget] = useState<boolean[]>([false, false, false, false, false]);
+  const [passwordState, setPasswordState] = useState<number[]>([0, 0, 0]);
+  const [passwordTarget, setPasswordTarget] = useState<string>('SOL');
+  const [passwordColumns, setPasswordColumns] = useState<string[][]>([[], [], []]);
+  const [buttonColor, setButtonColor] = useState<string>('Rojo');
+  const [buttonText, setButtonText] = useState<string>('ABORTAR');
+  const [buttonRule, setButtonRule] = useState<string>('any');
+
   const [timeLeft, setTimeLeft] = useState(300);
   const [gameState, setGameState] = useState<'waiting' | 'playing' | 'exploded' | 'defused'>('playing');
-  const [modulesSolved, setModulesSolved] = useState({ wires: false, keypad: false, simon: false, frequency: false, morse: false });
-  const [moduleOrder, setModuleOrder] = useState<string[]>(['wires', 'keypad', 'simon', 'frequency', 'morse']);
+  const [modulesSolved, setModulesSolved] = useState({ wires: false, keypad: false, simon: false, morse: false, frequency: false, switches: false, password: false, button: false });
+  const [moduleOrder, setModuleOrder] = useState<string[]>(['wires', 'keypad', 'simon', 'morse', 'frequency', 'switches', 'password', 'button']);
   
+  // Anomaly State
+  const [bombPowerLost, setBombPowerLost] = useState(false);
+  const [manualScrambled, setManualScrambled] = useState(false);
+
   // Online State
   const [roomId, setRoomId] = useState<string | null>(null);
   const [joinCode, setJoinCode] = useState('');
@@ -94,11 +118,25 @@ export default function App() {
         if (data.simonInput) setSimonInput(data.simonInput);
         if (data.freqTarget) setFreqTarget(data.freqTarget);
         if (data.freqCurrent) setFreqCurrent(data.freqCurrent);
+
+        if (data.switchesState) setSwitchesState(data.switchesState);
+        if (data.switchesTarget) setSwitchesTarget(data.switchesTarget);
+        if (data.passwordState) setPasswordState(data.passwordState);
+        if (data.passwordTarget) setPasswordTarget(data.passwordTarget);
+        if (data.passwordColumns) setPasswordColumns(data.passwordColumns);
+        if (data.buttonColor) setButtonColor(data.buttonColor);
+        if (data.buttonText) setButtonText(data.buttonText);
+        if (data.buttonRule) setButtonRule(data.buttonRule);
+
         if (data.morseWord) setMorseWord(data.morseWord);
         if (data.modulesSolved) setModulesSolved(data.modulesSolved);
         if (data.moduleOrder) setModuleOrder(data.moduleOrder);
         if (data.players) setPlayers(data.players);
         if (data.endTime) setOnlineEndTime(data.endTime);
+        if (data.anomalies) {
+          setBombPowerLost(data.anomalies.bombPowerLost || false);
+          setManualScrambled(data.anomalies.manualScrambled || false);
+        }
       }
     }, (error) => {
       console.error("Error en onSnapshot:", error);
@@ -119,7 +157,8 @@ export default function App() {
         difficulty: difficulty,
         mode: gameMode, // Store the mode in the room
         players: {},
-        createdAt: Date.now()
+        createdAt: Date.now(),
+        anomalies: { bombPowerLost: false, manualScrambled: false }
       });
       setRoomId(code);
       // gameMode is already set when clicking the menu button
@@ -162,7 +201,7 @@ export default function App() {
       };
 
       // Find if the player already has a role and remove it
-      Object.entries(players).forEach(([existingRole, playerData]) => {
+      Object.entries(players).forEach(([existingRole, playerData]: [string, any]) => {
         if (playerData.uid === myUid && existingRole !== role) {
           updates[`players.${existingRole}`] = deleteField();
         }
@@ -243,7 +282,38 @@ export default function App() {
     // Morse Code
     const randomMorse = MORSE_WORDS[Math.floor(Math.random() * MORSE_WORDS.length)];
 
-    const finalOrder = ['wires', 'keypad', 'simon', 'frequency', 'morse'].sort(() => Math.random() - 0.5);
+    
+    // Switches
+    const numCountSwitches = (result.match(/\d/g) || []).length;
+    const startsWithLetter = /[A-Z]/.test(result[0]);
+    let targetSwitches = [true, true, false, false, true];
+    if (numCountSwitches > 2) targetSwitches = [true, false, false, true, true];
+    else if (startsWithLetter) targetSwitches = [false, true, true, false, false];
+
+    // Password
+    let targetPass = 'REY';
+    if (result.includes('R')) targetPass = 'MAR';
+    else if (result.includes('S')) targetPass = 'SOL';
+    else if (result.includes('L')) targetPass = 'LUN';
+    
+    const passCols = [[], [], []];
+    for (let i = 0; i < 3; i++) {
+      const col = new Set([targetPass[i]]);
+      while (col.size < 4) {
+        col.add(String.fromCharCode(65 + Math.floor(Math.random() * 26)));
+      }
+      passCols[i] = Array.from(col).sort(() => Math.random() - 0.5);
+    }
+
+    // Button
+    const bColor = BUTTON_COLORS[Math.floor(Math.random() * BUTTON_COLORS.length)];
+    const bText = BUTTON_TEXTS[Math.floor(Math.random() * BUTTON_TEXTS.length)];
+    let bRule = 'any';
+    if (bColor.name === 'Rojo') bRule = 'even';
+    else if (bText === 'DETONAR') bRule = 'odd';
+
+    const finalOrder = ['wires', 'keypad', 'simon', 'morse', 'frequency', 'switches', 'password', 'button'].sort(() => Math.random() - 0.5);
+
 
     if ((mode === 'squad_online' || mode === 'coop_online') && roomId) {
       try {
@@ -259,9 +329,20 @@ export default function App() {
           freqTarget: targetFreq,
           freqCurrent: 90.0,
           morseWord: randomMorse,
-          modulesSolved: { wires: false, keypad: false, simon: false, frequency: false, morse: false },
+          
+          switchesState: [false, false, false, false, false],
+          switchesTarget: targetSwitches,
+          passwordState: [0, 0, 0],
+          passwordTarget: targetPass,
+          passwordColumns: passCols,
+          buttonColor: bColor.name,
+          buttonText: bText,
+          buttonRule: bRule,
+          modulesSolved: { wires: false, keypad: false, simon: false, morse: false, frequency: false, switches: false, password: false, button: false },
+
           moduleOrder: finalOrder,
-          endTime: Date.now() + time * 1000
+          endTime: Date.now() + time * 1000,
+          anomalies: { bombPowerLost: false, manualScrambled: false }
         });
       } catch (error: any) {
         console.error("Error al iniciar partida online:", error);
@@ -271,8 +352,18 @@ export default function App() {
       setGameMode(mode);
       setDifficulty(diff);
       setGameState('playing');
-      setCoopRole('technician');
-      setModulesSolved({ wires: false, keypad: false, simon: false, frequency: false, morse: false });
+      setCoopRole('alpha');
+      
+      setModulesSolved({ wires: false, keypad: false, simon: false, morse: false, frequency: false, switches: false, password: false, button: false });
+      setSwitchesState([false, false, false, false, false]);
+      setSwitchesTarget(targetSwitches);
+      setPasswordState([0, 0, 0]);
+      setPasswordTarget(targetPass);
+      setPasswordColumns(passCols);
+      setButtonColor(bColor.name);
+      setButtonText(bText);
+      setButtonRule(bRule);
+
       setKeypadOrder(0);
       setSimonInput([]);
       setFreqCurrent(90.0);
@@ -285,6 +376,8 @@ export default function App() {
       setFreqTarget(targetFreq);
       setMorseWord(randomMorse);
       setModuleOrder(finalOrder);
+      setBombPowerLost(false);
+      setManualScrambled(false);
     }
   };
 
@@ -314,7 +407,7 @@ export default function App() {
 
   // Simon sequence display logic
   useEffect(() => {
-    if (gameState !== 'playing' || modulesSolved.simon || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'expert')) return;
+    if (gameState !== 'playing' || modulesSolved.simon || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'beta')) return;
 
     let currentIdx = 0;
     const interval = setInterval(() => {
@@ -328,7 +421,7 @@ export default function App() {
 
   // Morse flashing logic
   useEffect(() => {
-    if (gameState !== 'playing' || modulesSolved.morse || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'expert')) return;
+    if (gameState !== 'playing' || modulesSolved.morse || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'alpha')) return;
 
     const code = morseWord.code;
     const units: boolean[] = [];
@@ -358,7 +451,7 @@ export default function App() {
   }, [morseWord, gameState, modulesSolved.morse, gameMode, coopRole]);
 
   useEffect(() => {
-    if (modulesSolved.wires && modulesSolved.keypad && modulesSolved.simon && modulesSolved.frequency && modulesSolved.morse && gameState === 'playing') {
+    if (modulesSolved.wires && modulesSolved.keypad && modulesSolved.simon && modulesSolved.morse && modulesSolved.frequency && modulesSolved.switches && modulesSolved.password && modulesSolved.button && gameState === 'playing') {
       if (roomId) {
         updateDoc(doc(db, 'rooms', roomId), { gameState: 'defused' });
       } else {
@@ -367,8 +460,50 @@ export default function App() {
     }
   }, [modulesSolved, gameState, roomId]);
 
+  // Anomaly Director
+  useEffect(() => {
+    if (gameState !== 'playing' || gameMode === 'single') return;
+    // Only alpha acts as the "host" for generating anomalies to avoid multiple triggers
+    if ((gameMode === 'coop_online' || gameMode === 'squad_online') && coopRole !== 'alpha') return;
+
+    const interval = setInterval(() => {
+      const rand = Math.random();
+      if (rand < 0.15 && !bombPowerLost) {
+        if (roomId) {
+          updateDoc(doc(db, 'rooms', roomId), { 'anomalies.bombPowerLost': true });
+        } else {
+          setBombPowerLost(true);
+        }
+      } else if (rand > 0.85 && !manualScrambled) {
+        if (roomId) {
+          updateDoc(doc(db, 'rooms', roomId), { 'anomalies.manualScrambled': true });
+        } else {
+          setManualScrambled(true);
+        }
+      }
+    }, 12000);
+
+    return () => clearInterval(interval);
+  }, [gameState, gameMode, coopRole, roomId, bombPowerLost, manualScrambled]);
+
+  const fixPower = () => {
+    if (roomId) {
+      updateDoc(doc(db, 'rooms', roomId), { 'anomalies.bombPowerLost': false });
+    } else {
+      setBombPowerLost(false);
+    }
+  };
+
+  const fixComms = () => {
+    if (roomId) {
+      updateDoc(doc(db, 'rooms', roomId), { 'anomalies.manualScrambled': false });
+    } else {
+      setManualScrambled(false);
+    }
+  };
+
   const handlePanicClick = () => {
-    if (gameState !== 'playing' || modulesSolved.wires || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'expert')) return;
+    if (gameState !== 'playing' || modulesSolved.wires || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'beta')) return;
 
     const newWires = wires.map(w => ({ ...w, cut: true }));
     const isExploded = Math.random() < 0.4;
@@ -392,7 +527,7 @@ export default function App() {
   };
 
   const handleWireClick = (id: number) => {
-    if (gameState !== 'playing' || modulesSolved.wires || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'expert')) return;
+    if (gameState !== 'playing' || modulesSolved.wires || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'beta')) return;
 
     const wire = wires.find(w => w.id === id);
     if (!wire || wire.cut) return;
@@ -429,7 +564,7 @@ export default function App() {
   };
 
   const handleKeypadClick = (symbol: string) => {
-    if (gameState !== 'playing' || modulesSolved.keypad || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'expert')) return;
+    if (gameState !== 'playing' || modulesSolved.keypad || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'alpha')) return;
 
     const button = keypad.find(b => b.symbol === symbol);
     if (!button || button.pressed) return;
@@ -480,7 +615,7 @@ export default function App() {
   };
 
   const handleSimonClick = (idx: number) => {
-    if (gameState !== 'playing' || modulesSolved.simon || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'expert')) return;
+    if (gameState !== 'playing' || modulesSolved.simon || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'beta')) return;
 
     const hasVowel = /[AEIOU]/.test(serialNumber);
     const flashIdx = simonSequence[simonInput.length];
@@ -525,7 +660,7 @@ export default function App() {
   };
 
   const handleFreqChange = (amount: number) => {
-    if (gameState !== 'playing' || modulesSolved.frequency || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'expert')) return;
+    if (gameState !== 'playing' || modulesSolved.frequency || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'beta')) return;
     const next = Math.min(120, Math.max(70, parseFloat((freqCurrent + amount).toFixed(1))));
     if (roomId) {
       updateDoc(doc(db, 'rooms', roomId), { freqCurrent: next });
@@ -535,7 +670,7 @@ export default function App() {
   };
 
   const handleFreqSubmit = () => {
-    if (gameState !== 'playing' || modulesSolved.frequency || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'expert')) return;
+    if (gameState !== 'playing' || modulesSolved.frequency || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'beta')) return;
     const isCorrect = Math.abs(freqCurrent - freqTarget) < 0.05;
     if (roomId) {
       if (isCorrect) {
@@ -553,7 +688,7 @@ export default function App() {
   };
 
   const handleMorseSubmit = () => {
-    if (gameState !== 'playing' || modulesSolved.morse || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'expert')) return;
+    if (gameState !== 'playing' || modulesSolved.morse || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'alpha')) return;
 
     const selectedFreq = MORSE_WORDS[currentMorseFreqIdx].freq;
     const isCorrect = selectedFreq === morseWord.freq;
@@ -570,6 +705,71 @@ export default function App() {
       } else {
         setGameState('exploded');
       }
+    }
+  };
+
+  
+  const handleSwitchToggle = (idx: number) => {
+    if (gameState !== 'playing' || modulesSolved.switches || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'alpha')) return;
+    const newState = [...switchesState];
+    newState[idx] = !newState[idx];
+    if (roomId) {
+      updateDoc(doc(db, 'rooms', roomId), { switchesState: newState });
+    } else {
+      setSwitchesState(newState);
+    }
+  };
+
+  const handleSwitchesSubmit = () => {
+    if (gameState !== 'playing' || modulesSolved.switches || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'alpha')) return;
+    const isCorrect = switchesState.every((val, i) => val === switchesTarget[i]);
+    if (roomId) {
+      if (isCorrect) updateDoc(doc(db, 'rooms', roomId), { 'modulesSolved.switches': true });
+      else updateDoc(doc(db, 'rooms', roomId), { gameState: 'exploded' });
+    } else {
+      if (isCorrect) setModulesSolved(prev => ({ ...prev, switches: true }));
+      else setGameState('exploded');
+    }
+  };
+
+  const handlePasswordChange = (colIdx: number, dir: number) => {
+    if (gameState !== 'playing' || modulesSolved.password || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'beta')) return;
+    const newState = [...passwordState];
+    newState[colIdx] = (newState[colIdx] + dir + 4) % 4;
+    if (roomId) {
+      updateDoc(doc(db, 'rooms', roomId), { passwordState: newState });
+    } else {
+      setPasswordState(newState);
+    }
+  };
+
+  const handlePasswordSubmit = () => {
+    if (gameState !== 'playing' || modulesSolved.password || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'beta')) return;
+    const currentWord = passwordColumns.map((col, i) => col[passwordState[i]]).join('');
+    const isCorrect = currentWord === passwordTarget;
+    if (roomId) {
+      if (isCorrect) updateDoc(doc(db, 'rooms', roomId), { 'modulesSolved.password': true });
+      else updateDoc(doc(db, 'rooms', roomId), { gameState: 'exploded' });
+    } else {
+      if (isCorrect) setModulesSolved(prev => ({ ...prev, password: true }));
+      else setGameState('exploded');
+    }
+  };
+
+  const handleButtonClick = () => {
+    if (gameState !== 'playing' || modulesSolved.button || ((gameMode === 'coop' || gameMode === 'coop_online') && coopRole === 'alpha')) return;
+    const seconds = timeLeft % 60;
+    let isCorrect = false;
+    if (buttonRule === 'even') isCorrect = seconds % 2 === 0;
+    else if (buttonRule === 'odd') isCorrect = seconds % 2 !== 0;
+    else isCorrect = true;
+
+    if (roomId) {
+      if (isCorrect) updateDoc(doc(db, 'rooms', roomId), { 'modulesSolved.button': true });
+      else updateDoc(doc(db, 'rooms', roomId), { gameState: 'exploded' });
+    } else {
+      if (isCorrect) setModulesSolved(prev => ({ ...prev, button: true }));
+      else setGameState('exploded');
     }
   };
 
@@ -764,14 +964,14 @@ export default function App() {
               <div className="grid grid-cols-2 gap-2">
                 {(gameMode === 'coop_online' 
                   ? [
-                      { id: 'technician', label: 'TÉCNICO' },
-                      { id: 'expert', label: 'EXPERTO' }
+                      { id: 'alpha', label: 'SECTOR A' },
+                      { id: 'beta', label: 'SECTOR B' }
                     ]
                   : [
-                      { id: 'technician', label: 'TÉCNICO' },
-                      { id: 'expert_alpha', label: 'EXP. ALPHA' },
-                      { id: 'expert_beta', label: 'EXP. BETA' },
-                      { id: 'expert_gamma', label: 'EXP. GAMMA' }
+                      { id: 'alpha', label: 'SECTOR A' },
+                      { id: 'beta', label: 'SECTOR B' },
+                      { id: 'gamma', label: 'SECTOR C' },
+                      { id: 'delta', label: 'SECTOR D' }
                     ]
                 ).map(role => {
                   const playerInRole = players[role.id];
@@ -821,8 +1021,13 @@ export default function App() {
   }
 
   return (
-    <div className="flex flex-col items-center justify-start gap-6 pb-20 min-h-screen w-full overflow-x-hidden bg-zinc-950">
+    <div className={`flex flex-col items-center justify-start gap-6 pb-20 min-h-screen w-full overflow-x-hidden bg-zinc-950 transition-colors duration-1000 relative`}>
       
+      {/* Adrenaline Pulse Overlay */}
+      {gameState === 'playing' && timeLeft <= 60 && timeLeft > 0 && (
+        <div className="pointer-events-none fixed inset-0 z-0 bg-red-900/10 animate-[pulse_1s_ease-in-out_infinite]" />
+      )}
+
       {/* Sticky Header for Timer and Status */}
       <div className="sticky top-0 z-50 w-full bg-zinc-950/90 backdrop-blur-md border-b-4 border-zinc-900 p-4 shadow-2xl">
         <div className="max-w-6xl mx-auto flex flex-wrap justify-between items-center gap-4">
@@ -851,16 +1056,16 @@ export default function App() {
             {gameMode === 'coop' ? (
               <>
                 <button 
-                  onClick={() => setCoopRole('technician')}
-                  className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'technician' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
+                  onClick={() => setCoopRole('alpha')}
+                  className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'alpha' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
                 >
-                  TÉCNICO
+                  SECTOR A
                 </button>
                 <button 
-                  onClick={() => setCoopRole('expert')}
-                  className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'expert' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
+                  onClick={() => setCoopRole('beta')}
+                  className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'beta' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
                 >
-                  EXPERTO
+                  SECTOR B
                 </button>
               </>
             ) : (
@@ -874,28 +1079,28 @@ export default function App() {
         {gameMode === 'squad' && gameState === 'playing' && (
           <div className="flex flex-wrap justify-center gap-2 mb-4">
             <button 
-              onClick={() => setCoopRole('technician')}
-              className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'technician' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
+              onClick={() => setCoopRole('alpha')}
+              className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'alpha' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
             >
-              TÉCNICO
+              SECTOR A
             </button>
             <button 
-              onClick={() => setCoopRole('expert_alpha')}
-              className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'expert_alpha' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
+              onClick={() => setCoopRole('beta')}
+              className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'beta' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
             >
-              EXP. ALPHA
+              SECTOR B
             </button>
             <button 
-              onClick={() => setCoopRole('expert_beta')}
-              className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'expert_beta' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
+              onClick={() => setCoopRole('gamma')}
+              className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'gamma' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
             >
-              EXP. BETA
+              SECTOR C
             </button>
             <button 
-              onClick={() => setCoopRole('expert_gamma')}
-              className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'expert_gamma' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
+              onClick={() => setCoopRole('delta')}
+              className={`font-pixel text-[8px] px-4 py-2 border-2 transition-all ${coopRole === 'delta' ? 'bg-zinc-100 text-zinc-900 border-zinc-100' : 'bg-transparent text-zinc-500 border-zinc-800'}`}
             >
-              EXP. GAMMA
+              SECTOR D
             </button>
           </div>
         )}
@@ -909,12 +1114,250 @@ export default function App() {
         )}
       </div>
 
-      <div className="relative w-full max-w-6xl flex flex-wrap justify-center gap-6">
+            <div className="relative w-full max-w-6xl flex flex-col items-center gap-6">
         
-        {(gameMode === 'single' || ((gameMode === 'coop' || gameMode === 'coop_online' || gameMode === 'squad' || gameMode === 'squad_online') && coopRole === 'technician')) ? (
-          <>
-            {moduleOrder.map((moduleType, index) => {
-              const modNum = (index + 1).toString().padStart(2, '0');
+        {/* Anomaly Controls (Cross-Interaction) */}
+        <div className="w-full flex flex-col items-center gap-4">
+          {bombPowerLost && (coopRole === 'beta' || coopRole === 'gamma' || coopRole === 'delta') && (
+            <motion.button
+              initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}
+              onClick={fixPower}
+              className="w-full max-w-[320px] bg-yellow-500 hover:bg-yellow-400 text-zinc-900 font-pixel py-4 border-4 border-yellow-700 animate-pulse shadow-[0_0_15px_rgba(234,179,8,0.6)] z-50"
+            >
+              ¡REINICIAR ENERGÍA DEL SECTOR ALIADO!
+            </motion.button>
+          )}
+
+          {manualScrambled && (coopRole === 'alpha' || coopRole === 'gamma') && (
+            <motion.button
+              initial={{ opacity: 0, y: -20 }} animate={{ opacity: 1, y: 0 }}
+              onClick={fixComms}
+              className="w-full max-w-[320px] bg-red-600 hover:bg-red-500 text-white font-pixel py-4 border-4 border-red-900 animate-pulse shadow-[0_0_15px_rgba(220,38,38,0.6)] z-50"
+            >
+              ¡RESTAURAR SISTEMA DEL SECTOR ALIADO!
+            </motion.button>
+          )}
+        </div>
+
+        
+        
+        
+        {/* INTEL PANEL (Only for online modes) */}
+        {(gameMode === 'coop_online' || gameMode === 'squad_online') && gameState === 'playing' && (
+          <div className="w-full max-w-4xl bg-zinc-900 border-4 border-blue-900 p-4 rounded-xl mb-6 shadow-[0_0_20px_rgba(30,58,138,0.4)]">
+            <div className="flex items-center justify-between mb-4 border-b-2 border-blue-900 pb-2">
+              <h3 className="text-blue-400 font-pixel text-sm">CENTRO DE INTELIGENCIA TÁCTICA</h3>
+              <div className="flex gap-2">
+                <div className="flex items-center gap-1">
+                  <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
+                  <span className="text-[8px] text-zinc-500 font-pixel">EN LÍNEA</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* Left Column: Assigned Intel */}
+              <div className="lg:col-span-2">
+                <p className="text-zinc-500 font-pixel text-[8px] mb-3 uppercase tracking-widest">Manual de Desactivación (Asignado a ti)</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {/* Wires Intel (Assigned to Beta/Delta) */}
+                  {((gameMode === 'coop_online' && coopRole === 'beta') || (gameMode === 'squad_online' && coopRole === 'delta')) && (
+                    <div className="p-3 bg-zinc-950 border-2 border-zinc-800 rounded text-[10px] text-zinc-400 font-mono hover:border-blue-900 transition-colors group">
+                      <p className="mb-2 text-blue-400 font-bold border-b border-zinc-800 pb-1 group-hover:text-blue-300">INTEL: CABLES (SECTOR A)</p>
+                      <ul className="list-disc pl-4 space-y-1 text-[9px]">
+                        <li>Si S/N tiene vocal: Cortar el ÚLTIMO cable.</li>
+                        <li>Si S/N termina en PAR: Cortar el PRIMER cable ROJO.</li>
+                        <li>Si hay &gt; 2 cables AZULES: Cortar el SEGUNDO cable AZUL.</li>
+                        <li className="text-orange-400 font-bold border-t border-zinc-900 mt-1 pt-1">PISTA CRUZADA: El cable a cortar es el que coincide con el texto del botón en el Sector D (ABORTAR=1º, DETONAR=Último).</li>
+                      </ul>
+                    </div>
+                  )}
+                  
+                  {/* Keypad Intel (Assigned to Alpha) */}
+                  {((gameMode === 'coop_online' && coopRole === 'alpha') || (gameMode === 'squad_online' && coopRole === 'alpha')) && (
+                    <div className="p-3 bg-zinc-950 border-2 border-zinc-800 rounded text-[10px] text-zinc-400 font-mono hover:border-blue-900 transition-colors group">
+                      <p className="mb-2 text-blue-400 font-bold border-b border-zinc-800 pb-1 group-hover:text-blue-300">INTEL: TECLADO (SECTOR B)</p>
+                      <ul className="list-decimal pl-3 space-y-1 mb-2 text-[8px]">
+                        <li>Si S/N tiene dígito PAR: Menor a mayor jerarquía. Si no: Mayor a menor.</li>
+                        <li>Si S/N tiene VOCAL: El último pasa a ser el primero.</li>
+                        <li className="text-orange-400 font-bold border-t border-zinc-900 mt-1 pt-1">PISTA CRUZADA: El primer símbolo a presionar es el que corresponde al color del 3er cable en el Sector A.</li>
+                      </ul>
+                      <p className="text-zinc-500 text-center text-[7px] break-words bg-zinc-900 p-1 rounded">{KEYPAD_HIERARCHY.join(' < ')}</p>
+                    </div>
+                  )}
+
+                  {/* Simon Intel (Assigned to Beta) */}
+                  {((gameMode === 'coop_online' && coopRole === 'beta') || (gameMode === 'squad_online' && coopRole === 'beta')) && (
+                    <div className="p-3 bg-zinc-950 border-2 border-zinc-800 rounded text-[10px] text-zinc-400 font-mono hover:border-blue-900 transition-colors group">
+                      <p className="mb-2 text-blue-400 font-bold border-b border-zinc-800 pb-1 group-hover:text-blue-300">INTEL: SIMON (SECTOR C/A)</p>
+                      <div className="grid grid-cols-2 gap-2 text-[8px] mb-2">
+                        <div>
+                          <p className="text-zinc-300 mb-1 underline">Si S/N tiene VOCAL:</p>
+                          <ul className="space-y-1">
+                            <li><span className="text-red-400">Rojo</span> &rarr; <span className="text-blue-400">Azul</span></li>
+                            <li><span className="text-blue-400">Azul</span> &rarr; <span className="text-red-400">Rojo</span></li>
+                          </ul>
+                        </div>
+                        <div>
+                          <p className="text-zinc-300 mb-1 underline">Si NO tiene vocal:</p>
+                          <ul className="space-y-1">
+                            <li><span className="text-green-400">Verde</span> &rarr; <span className="text-blue-400">Azul</span></li>
+                            <li><span className="text-yellow-400">Amarillo</span> &rarr; <span className="text-red-400">Rojo</span></li>
+                          </ul>
+                        </div>
+                      </div>
+                      <p className="text-orange-400 font-bold border-t border-zinc-900 mt-1 pt-1 text-[8px]">PISTA CRUZADA: El primer color a presionar es el color del botón en el Sector D.</p>
+                    </div>
+                  )}
+
+                  {/* Morse Intel (Assigned to Alpha/Gamma) */}
+                  {((gameMode === 'coop_online' && coopRole === 'alpha') || (gameMode === 'squad_online' && coopRole === 'gamma')) && (
+                    <div className="p-3 bg-zinc-950 border-2 border-zinc-800 rounded text-[10px] text-zinc-400 font-mono hover:border-blue-900 transition-colors group">
+                      <p className="mb-2 text-blue-400 font-bold border-b border-zinc-800 pb-1 group-hover:text-blue-300">INTEL: MORSE (SECTOR D/B)</p>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-[8px] mb-2">
+                        {MORSE_WORDS.slice(0, 4).map((m, i) => (
+                          <div key={i} className="flex justify-between border-b border-zinc-900 pb-0.5">
+                            <span className="text-zinc-300">{m.word}</span>
+                            <span className="text-green-500">{m.freq}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <p className="text-orange-400 font-bold border-t border-zinc-900 mt-1 pt-1 text-[8px]">PISTA CRUZADA: La frecuencia termina en el número de interruptores encendidos en el Sector B.</p>
+                    </div>
+                  )}
+
+                  {/* Frequency Intel (Assigned to Beta/Delta) */}
+                  {((gameMode === 'coop_online' && coopRole === 'beta') || (gameMode === 'squad_online' && coopRole === 'delta')) && (
+                    <div className="p-3 bg-zinc-950 border-2 border-zinc-800 rounded text-[10px] text-zinc-400 font-mono hover:border-blue-900 transition-colors group">
+                      <p className="mb-2 text-blue-400 font-bold border-b border-zinc-800 pb-1 group-hover:text-blue-300">INTEL: FRECUENCIA (SECTOR A)</p>
+                      <ul className="list-disc pl-4 space-y-1 text-[9px]">
+                        <li>Si S/N tiene VOCAL: 101.5 MHz</li>
+                        <li>Si S/N termina en PAR: 88.8 MHz</li>
+                        <li className="text-orange-400 font-bold border-t border-zinc-900 mt-1 pt-1">PISTA CRUZADA: La frecuencia base es 90.0 + (Número de cables en Sector A).</li>
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Switches Intel (Assigned to Alpha) */}
+                  {((gameMode === 'coop_online' && coopRole === 'alpha') || (gameMode === 'squad_online' && coopRole === 'alpha')) && (
+                    <div className="p-3 bg-zinc-950 border-2 border-zinc-800 rounded text-[10px] text-zinc-400 font-mono hover:border-blue-900 transition-colors group">
+                      <p className="mb-2 text-blue-400 font-bold border-b border-zinc-800 pb-1 group-hover:text-blue-300">INTEL: INTERRUPTORES (SECTOR B)</p>
+                      <ul className="list-disc pl-4 space-y-1 text-[9px]">
+                        <li>Si S/N tiene &gt; 2 NÚMEROS: ↑ ↓ ↓ ↑ ↑</li>
+                        <li>Si S/N empieza con LETRA: ↓ ↑ ↑ ↓ ↓</li>
+                        <li className="text-orange-400 font-bold border-t border-zinc-900 mt-1 pt-1">PISTA CRUZADA: El 3er interruptor debe estar en la misma posición que el 1er cable del Sector A (Rojo=↑, Azul=↓).</li>
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Password Intel (Assigned to Beta) */}
+                  {((gameMode === 'coop_online' && coopRole === 'beta') || (gameMode === 'squad_online' && coopRole === 'beta')) && (
+                    <div className="p-3 bg-zinc-950 border-2 border-zinc-800 rounded text-[10px] text-zinc-400 font-mono hover:border-blue-900 transition-colors group">
+                      <p className="mb-2 text-blue-400 font-bold border-b border-zinc-800 pb-1 group-hover:text-blue-300">INTEL: CONTRASEÑA (SECTOR C)</p>
+                      <ul className="list-disc pl-4 space-y-1 text-[9px]">
+                        <li>Si S/N tiene 'R': MAR</li>
+                        <li>Si S/N tiene 'S': SOL</li>
+                        <li className="text-orange-400 font-bold border-t border-zinc-900 mt-1 pt-1">PISTA CRUZADA: La contraseña empieza con la letra que parpadea primero en el Simon del Sector C.</li>
+                      </ul>
+                    </div>
+                  )}
+
+                  {/* Button Intel (Assigned to Alpha/Gamma) */}
+                  {((gameMode === 'coop_online' && coopRole === 'alpha') || (gameMode === 'squad_online' && coopRole === 'gamma')) && (
+                    <div className="p-3 bg-zinc-950 border-2 border-zinc-800 rounded text-[10px] text-zinc-400 font-mono hover:border-blue-900 transition-colors group">
+                      <p className="mb-2 text-blue-400 font-bold border-b border-zinc-800 pb-1 group-hover:text-blue-300">INTEL: BOTÓN (SECTOR D)</p>
+                      <ul className="list-disc pl-4 space-y-1 text-[9px]">
+                        <li>Si es ROJO: Presionar en segundo PAR</li>
+                        <li>Si dice DETONAR: Presionar en segundo IMPAR</li>
+                        <li className="text-orange-400 font-bold border-t border-zinc-900 mt-1 pt-1">PISTA CRUZADA: Si el Sector B tiene más de 3 interruptores encendidos, ignorar el color y presionar en segundo 5.</li>
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Right Column: Cross-Sector Status & Global Intel */}
+              <div className="flex flex-col gap-4">
+                <div className="bg-zinc-950 border-2 border-zinc-800 rounded p-3">
+                  <p className="text-orange-400 font-pixel text-[8px] mb-3 uppercase tracking-widest border-b border-zinc-800 pb-1">Estado de Sectores</p>
+                  <div className="space-y-2">
+                    {Object.entries(modulesSolved).map(([mod, solved]) => (
+                      <div key={mod} className="flex items-center justify-between text-[8px] font-mono">
+                        <span className="text-zinc-500 uppercase">{mod}</span>
+                        <span className={solved ? "text-green-500" : "text-red-500"}>
+                          {solved ? "[DESACTIVADO]" : "[ACTIVO]"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="bg-zinc-950 border-2 border-blue-900/30 rounded p-3">
+                  <p className="text-blue-400 font-pixel text-[8px] mb-3 uppercase tracking-widest border-b border-zinc-800 pb-1">Protocolo Cruzado</p>
+                  <div className="text-[9px] text-zinc-400 font-mono space-y-3">
+                    <div className="p-2 bg-blue-900/10 rounded border border-blue-900/20">
+                      <p className="text-blue-300 font-bold mb-1">REGLA DE ORO:</p>
+                      <p>Tus instrucciones son para OTROS sectores. Comunícate por voz o chat.</p>
+                    </div>
+                    
+                    {gameMode === 'squad_online' && (
+                      <div className="space-y-2">
+                        <p className="text-zinc-500 italic">Cadena de Mando:</p>
+                        <p className="text-[8px] leading-relaxed">
+                          ALPHA &rarr; BETA &rarr; GAMMA &rarr; DELTA &rarr; ALPHA
+                        </p>
+                      </div>
+                    )}
+
+                    <div className="pt-2 border-t border-zinc-800">
+                      <p className="text-zinc-500 mb-1">Anomalías:</p>
+                      <p className="text-[8px]">Si ves un botón de REINICIO, presiónalo para ayudar a tus aliados.</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* The Bomb Modules */}
+        <div className="flex flex-wrap justify-center gap-6 max-w-4xl relative">
+          
+          {/* Anomaly Overlays for the affected players */}
+          {bombPowerLost && (coopRole === 'alpha' || gameMode === 'solo' || gameMode === 'coop') && (
+            <div className="absolute inset-0 z-40 bg-zinc-950/95 backdrop-blur-sm flex flex-col items-center justify-center p-4 rounded-xl border-2 border-red-900">
+              <h2 className="text-red-600 font-pixel text-2xl md:text-4xl animate-pulse text-center drop-shadow-[0_0_10px_rgba(220,38,38,0.8)]">¡ENERGÍA CAÍDA!</h2>
+              <p className="text-zinc-300 font-mono text-center mt-4 text-xs md:text-sm">SOLICITA REINICIO AL SECTOR ALIADO</p>
+            </div>
+          )}
+
+          {manualScrambled && (coopRole === 'beta' || coopRole === 'delta') && (
+            <div className="absolute inset-0 z-40 bg-zinc-950/95 backdrop-blur-sm flex flex-col items-center justify-center p-4 rounded-xl border-2 border-green-900">
+              <h2 className="text-green-500 font-pixel text-2xl md:text-4xl animate-pulse text-center drop-shadow-[0_0_10px_rgba(34,197,94,0.8)]">ERROR DE SISTEMA</h2>
+              <p className="text-green-700 font-mono text-center mt-6 break-all text-xs md:text-sm opacity-70">
+                01001110 01001111 00100000 01010011 01001001 01000111 01001110 01000001 01001100 01010011 01011001 01010011 01010100 01000101 01001101 00100000 01000110 01000001 01001001 01001100 01010101 01010010 01000101
+              </p>
+              <p className="text-zinc-300 font-mono text-center mt-4 text-xs md:text-sm">SOLICITA RESTAURACIÓN AL SECTOR ALIADO</p>
+            </div>
+          )}
+
+          {/* Map over visible modules */}
+          {(() => {
+            
+            let visibleModules = moduleOrder;
+            if (gameMode === 'coop_online' || gameMode === 'coop') {
+              if (coopRole === 'alpha') visibleModules = visibleModules.filter(m => m === 'wires' || m === 'simon' || m === 'frequency' || m === 'password');
+              if (coopRole === 'beta') visibleModules = visibleModules.filter(m => m === 'keypad' || m === 'morse' || m === 'switches' || m === 'button');
+            } else if (gameMode === 'squad_online' || gameMode === 'squad') {
+              if (coopRole === 'alpha') visibleModules = ['wires', 'frequency'];
+              if (coopRole === 'beta') visibleModules = ['keypad', 'switches'];
+              if (coopRole === 'gamma') visibleModules = ['simon', 'password'];
+              if (coopRole === 'delta') visibleModules = ['morse', 'button'];
+            }
+
+
+            return visibleModules.map((moduleType, index) => {
+              const modNum = (moduleOrder.indexOf(moduleType) + 1).toString().padStart(2, '0');
               
               if (moduleType === 'wires') {
                 return (
@@ -927,13 +1370,12 @@ export default function App() {
                     ${gameState === 'exploded' ? 'brightness-50 grayscale' : ''}
                     ${modulesSolved.wires ? 'border-green-900' : ''}`}
                   >
-                    
                     <div className="flex justify-between items-center mb-4">
-                      <span className="font-pixel text-[8px] text-zinc-400">MOD-{modNum}: CABLES</span>
+                      <span className="font-pixel text-[8px] text-zinc-400">MOD-${modNum}: CABLES</span>
                       <div className={`w-3 h-3 rounded-full ${modulesSolved.wires ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-900'}`}></div>
                     </div>
 
-                    <div className="bg-zinc-700 border-4 border-zinc-900 p-4 rounded-lg mb-6">
+                    <div className="bg-zinc-700 border-4 border-zinc-900 p-4 rounded-lg mb-4">
                       <div className="flex flex-col gap-4">
                         {wires.map((wire) => (
                           <div key={wire.id} onClick={() => handleWireClick(wire.id)} className={`relative group ${gameState === 'playing' && !wire.cut && !modulesSolved.wires ? 'cursor-pointer' : ''}`}>
@@ -958,6 +1400,16 @@ export default function App() {
                         </button>
                       )}
                     </div>
+
+                    {/* INSTRUCTIONS */}
+                    {gameMode !== 'coop_online' && gameMode !== 'squad_online' && (
+                    <div className="p-3 bg-zinc-900 border-2 border-zinc-700 rounded text-[10px] text-zinc-400 font-mono">
+                      <p className="mb-2 text-zinc-300 font-bold border-b border-zinc-700 pb-1">INSTRUCCIONES:</p>
+                      {difficulty === 'easy' && <p>Si S/N termina en PAR &rarr; Cortar Rojo. Si no &rarr; Azul.</p>}
+                      {difficulty === 'medium' && <p>Si S/N tiene LETRAS &rarr; Cortar Amarillo. Si no &rarr; Verde.</p>}
+                      {difficulty === 'hard' && <p>Si S/N tiene VOCAL &rarr; Cortar Negro. Si no &rarr; Blanco.</p>}
+                    </div>
+                    )}
                   </motion.div>
                 );
               }
@@ -973,24 +1425,42 @@ export default function App() {
                     ${gameState === 'exploded' ? 'brightness-50 grayscale' : ''}
                     ${modulesSolved.keypad ? 'border-green-900' : ''}`}
                   >
-                    
-                    <div className="flex justify-between items-center mb-6">
-                      <span className="font-pixel text-[8px] text-zinc-400">MOD-{modNum}: TECLADO ULTRA</span>
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="font-pixel text-[8px] text-zinc-400">MOD-${modNum}: TECLADO</span>
                       <div className={`w-3 h-3 rounded-full ${modulesSolved.keypad ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-900'}`}></div>
                     </div>
 
-                    <div className="grid grid-cols-3 gap-2 bg-zinc-700 border-4 border-zinc-900 p-3 rounded-lg">
-                      {keypad.map((btn, idx) => (
-                        <button
-                          key={idx}
-                          onClick={() => handleKeypadClick(btn.symbol)}
-                          className={`h-14 flex items-center justify-center text-xl border-4 border-zinc-900 rounded transition-all active:translate-y-1 active:border-b-0
-                            ${btn.pressed ? 'bg-green-900/50 text-green-500 border-green-900' : 'bg-zinc-200 text-zinc-900 hover:bg-zinc-300 border-b-4 border-zinc-400'}`}
-                        >
-                          {btn.symbol}
-                        </button>
-                      ))}
+                    <div className="grid grid-cols-3 gap-2 mb-4">
+                      {keypad.map((btn, i) => {
+                        const isPressed = btn.pressed;
+                        return (
+                          <button
+                            key={i}
+                            onClick={() => handleKeypadClick(btn.symbol)}
+                            disabled={isPressed || modulesSolved.keypad || gameState !== 'playing'}
+                            className={`h-12 flex items-center justify-center text-xl bg-zinc-200 border-b-4 border-zinc-400 rounded transition-all
+                              ${isPressed ? 'bg-green-200 border-green-400 translate-y-1 border-b-0' : ''}
+                              ${!isPressed && gameState === 'playing' ? 'hover:bg-white active:translate-y-1 active:border-b-0' : ''}
+                            `}
+                          >
+                            {btn.symbol}
+                          </button>
+                        );
+                      })}
                     </div>
+
+                    {/* INSTRUCTIONS */}
+                    {gameMode !== 'coop_online' && gameMode !== 'squad_online' && (
+                    <div className="p-3 bg-zinc-900 border-2 border-zinc-700 rounded text-[10px] text-zinc-400 font-mono">
+                      <p className="mb-2 text-zinc-300 font-bold border-b border-zinc-700 pb-1">INSTRUCCIONES:</p>
+                      <ul className="list-decimal pl-3 space-y-1 mb-2 text-[8px]">
+                        <li>Si S/N tiene dígito PAR: Menor a mayor jerarquía. Si no: Mayor a menor.</li>
+                        <li>Si S/N tiene VOCAL: El último pasa a ser el primero.</li>
+                        <li>Si S/N tiene &gt; 2 LETRAS: Intercambia el 1º y el 6º.</li>
+                      </ul>
+                      <p className="text-white text-center text-[8px] break-words">{KEYPAD_HIERARCHY.join(' < ')}</p>
+                    </div>
+                    )}
                   </motion.div>
                 );
               }
@@ -1006,75 +1476,51 @@ export default function App() {
                     ${gameState === 'exploded' ? 'brightness-50 grayscale' : ''}
                     ${modulesSolved.simon ? 'border-green-900' : ''}`}
                   >
-                    
-                    <div className="flex justify-between items-center mb-6">
-                      <span className="font-pixel text-[8px] text-zinc-400">MOD-{modNum}: SIMON</span>
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="font-pixel text-[8px] text-zinc-400">MOD-${modNum}: SIMON</span>
                       <div className={`w-3 h-3 rounded-full ${modulesSolved.simon ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-900'}`}></div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-4 p-4 bg-zinc-900 rounded-lg border-4 border-zinc-950">
-                      {SIMON_COLORS.map((color, idx) => (
-                        <button
-                          key={idx}
-                          onClick={() => handleSimonClick(idx)}
-                          className={`h-20 rounded-lg transition-all duration-100 border-4 border-zinc-950
-                            ${simonActiveIdx === idx ? color.activeClass : color.class}
-                            ${gameState === 'playing' && !modulesSolved.simon ? 'cursor-pointer active:scale-95' : ''}`}
-                        />
-                      ))}
-                    </div>
-                    <div className="mt-4 flex justify-center gap-1">
-                      {simonSequence.map((_, i) => (
-                        <div key={i} className={`w-2 h-2 rounded-full ${i < simonInput.length ? 'bg-green-500' : 'bg-zinc-700'}`}></div>
-                      ))}
-                    </div>
-                  </motion.div>
-                );
-              }
-
-              if (moduleType === 'frequency') {
-                return (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: index * 0.1 }}
-                    key="frequency" 
-                    className={`relative w-full max-w-[320px] bg-zinc-800 border-8 border-zinc-900 rounded-lg p-6 shadow-[0_12px_0_#18181b] transition-all duration-500 
-                    ${gameState === 'exploded' ? 'brightness-50 grayscale' : ''}
-                    ${modulesSolved.frequency ? 'border-green-900' : ''}`}
-                  >
-                    
-                    <div className="flex justify-between items-center mb-6">
-                      <span className="font-pixel text-[8px] text-zinc-400">MOD-{modNum}: SINTONIZADOR</span>
-                      <div className={`w-3 h-3 rounded-full ${modulesSolved.frequency ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-900'}`}></div>
-                    </div>
-
-                    <div className="bg-zinc-950 border-4 border-zinc-900 p-4 mb-6 rounded flex flex-col items-center justify-center">
-                      <span className="font-pixel text-[8px] text-zinc-500 mb-1">FRECUENCIA (MHz)</span>
-                      <span className={`font-pixel text-3xl ${gameState === 'exploded' ? 'text-zinc-800' : 'text-blue-400'}`}>
-                        {freqCurrent.toFixed(1)}
-                      </span>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4 mb-4">
-                      <div className="flex flex-col gap-2">
-                        <button onClick={() => handleFreqChange(1.0)} className="bg-zinc-700 hover:bg-zinc-600 text-white font-pixel text-[8px] py-2 border-b-4 border-zinc-900 rounded">+</button>
-                        <button onClick={() => handleFreqChange(-1.0)} className="bg-zinc-700 hover:bg-zinc-600 text-white font-pixel text-[8px] py-2 border-b-4 border-zinc-900 rounded">-</button>
-                        <span className="text-center font-pixel text-[6px] text-zinc-500">GRUESO</span>
+                    <div className="relative w-48 h-48 mx-auto mb-4 bg-zinc-900 rounded-full p-2">
+                      <div className="absolute inset-2 rounded-full overflow-hidden">
+                        <div className="w-full h-full relative">
+                          <button onClick={() => handleSimonClick(0)} disabled={modulesSolved.simon || gameState !== 'playing'} className={`absolute top-0 left-0 w-1/2 h-1/2 bg-red-600 border-r-4 border-b-4 border-zinc-900 transition-all ${simonActiveIdx === 0 ? 'brightness-150 bg-red-400' : 'hover:brightness-110'}`}></button>
+                          <button onClick={() => handleSimonClick(1)} disabled={modulesSolved.simon || gameState !== 'playing'} className={`absolute top-0 right-0 w-1/2 h-1/2 bg-blue-600 border-l-4 border-b-4 border-zinc-900 transition-all ${simonActiveIdx === 1 ? 'brightness-150 bg-blue-400' : 'hover:brightness-110'}`}></button>
+                          <button onClick={() => handleSimonClick(3)} disabled={modulesSolved.simon || gameState !== 'playing'} className={`absolute bottom-0 left-0 w-1/2 h-1/2 bg-yellow-500 border-r-4 border-t-4 border-zinc-900 transition-all ${simonActiveIdx === 3 ? 'brightness-150 bg-yellow-300' : 'hover:brightness-110'}`}></button>
+                          <button onClick={() => handleSimonClick(2)} disabled={modulesSolved.simon || gameState !== 'playing'} className={`absolute bottom-0 right-0 w-1/2 h-1/2 bg-green-600 border-l-4 border-t-4 border-zinc-900 transition-all ${simonActiveIdx === 2 ? 'brightness-150 bg-green-400' : 'hover:brightness-110'}`}></button>
+                        </div>
                       </div>
-                      <div className="flex flex-col gap-2">
-                        <button onClick={() => handleFreqChange(0.1)} className="bg-zinc-700 hover:bg-zinc-600 text-white font-pixel text-[8px] py-2 border-b-4 border-zinc-900 rounded">+</button>
-                        <button onClick={() => handleFreqChange(-0.1)} className="bg-zinc-700 hover:bg-zinc-600 text-white font-pixel text-[8px] py-2 border-b-4 border-zinc-900 rounded">-</button>
-                        <span className="text-center font-pixel text-[6px] text-zinc-500">FINO</span>
+                      <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-16 h-16 bg-zinc-800 rounded-full border-4 border-zinc-900 flex items-center justify-center">
+                        <div className="w-8 h-8 rounded-full bg-zinc-950"></div>
                       </div>
                     </div>
 
-                    <button 
-                      onClick={handleFreqSubmit}
-                      className="w-full bg-blue-600 hover:bg-blue-500 text-white font-pixel text-[8px] py-3 border-b-4 border-blue-900 active:translate-y-1 active:border-b-0 transition-all rounded"
-                    >
-                      ESTABLECER CANAL
-                    </button>
+                    {/* INSTRUCTIONS */}
+                    {gameMode !== 'coop_online' && gameMode !== 'squad_online' && (
+                    <div className="p-3 bg-zinc-900 border-2 border-zinc-700 rounded text-[10px] text-zinc-400 font-mono">
+                      <p className="mb-2 text-zinc-300 font-bold border-b border-zinc-700 pb-1">INSTRUCCIONES:</p>
+                      <div className="grid grid-cols-2 gap-2 text-[8px]">
+                        <div>
+                          <p className="text-white mb-1">Si S/N tiene VOCAL:</p>
+                          <ul className="space-y-1">
+                            <li><span className="text-red-400">Rojo</span> &rarr; <span className="text-blue-400">Azul</span></li>
+                            <li><span className="text-blue-400">Azul</span> &rarr; <span className="text-red-400">Rojo</span></li>
+                            <li><span className="text-green-400">Verde</span> &rarr; <span className="text-yellow-400">Amarillo</span></li>
+                            <li><span className="text-yellow-400">Amarillo</span> &rarr; <span className="text-green-400">Verde</span></li>
+                          </ul>
+                        </div>
+                        <div>
+                          <p className="text-white mb-1">Si NO tiene vocal:</p>
+                          <ul className="space-y-1">
+                            <li><span className="text-red-400">Rojo</span> &rarr; <span className="text-yellow-400">Amarillo</span></li>
+                            <li><span className="text-blue-400">Azul</span> &rarr; <span className="text-green-400">Verde</span></li>
+                            <li><span className="text-green-400">Verde</span> &rarr; <span className="text-blue-400">Azul</span></li>
+                            <li><span className="text-yellow-400">Amarillo</span> &rarr; <span className="text-red-400">Rojo</span></li>
+                          </ul>
+                        </div>
+                      </div>
+                    </div>
+                    )}
                   </motion.div>
                 );
               }
@@ -1090,16 +1536,16 @@ export default function App() {
                     ${gameState === 'exploded' ? 'brightness-50 grayscale' : ''}
                     ${modulesSolved.morse ? 'border-green-900' : ''}`}
                   >
-                    <div className="flex justify-between items-center mb-6">
-                      <span className="font-pixel text-[8px] text-zinc-400">MOD-{modNum}: CÓDIGO MORSE</span>
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="font-pixel text-[8px] text-zinc-400">MOD-${modNum}: CÓDIGO MORSE</span>
                       <div className={`w-3 h-3 rounded-full ${modulesSolved.morse ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-900'}`}></div>
                     </div>
 
-                    <div className="flex justify-center mb-6">
+                    <div className="flex justify-center mb-4">
                       <div className={`w-12 h-12 rounded-full transition-colors duration-75 ${morseLightOn && gameState === 'playing' && !modulesSolved.morse ? 'bg-yellow-400 shadow-[0_0_30px_#facc15]' : 'bg-zinc-900'}`}></div>
                     </div>
 
-                    <div className="bg-zinc-950 border-4 border-zinc-900 p-4 mb-6 rounded flex flex-col items-center justify-center">
+                    <div className="bg-zinc-950 border-4 border-zinc-900 p-4 mb-4 rounded flex flex-col items-center justify-center">
                       <span className="font-pixel text-[8px] text-zinc-500 mb-1">TX FREQ (MHz)</span>
                       <span className={`font-pixel text-3xl ${gameState === 'exploded' ? 'text-zinc-800' : 'text-orange-400'}`}>
                         {MORSE_WORDS[currentMorseFreqIdx].freq}
@@ -1113,202 +1559,232 @@ export default function App() {
 
                     <button 
                       onClick={handleMorseSubmit}
-                      className="w-full bg-orange-600 hover:bg-orange-500 text-white font-pixel text-[8px] py-3 border-b-4 border-orange-900 active:translate-y-1 active:border-b-0 transition-all rounded"
+                      className="w-full bg-orange-600 hover:bg-orange-500 text-white font-pixel text-[8px] py-3 border-b-4 border-orange-900 active:translate-y-1 active:border-b-0 transition-all rounded mb-4"
                     >
                       TRANSMITIR
                     </button>
+
+                    {/* INSTRUCTIONS */}
+                    {gameMode !== 'coop_online' && gameMode !== 'squad_online' && (
+                    <div className="p-3 bg-zinc-900 border-2 border-zinc-700 rounded text-[10px] text-zinc-400 font-mono">
+                      <p className="mb-2 text-zinc-300 font-bold border-b border-zinc-700 pb-1">INSTRUCCIONES:</p>
+                      <div className="grid grid-cols-2 gap-x-2 gap-y-1 text-[9px]">
+                        {MORSE_WORDS.map(w => (
+                          <div key={w.word} className="flex justify-between">
+                            <span>{w.word}</span>
+                            <span className="text-orange-300">{w.freq}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    )}
                   </motion.div>
                 );
               }
+              
+              if (moduleType === 'frequency') {
+                return (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                    key="frequency" 
+                    className={`relative w-full max-w-[320px] bg-zinc-800 border-8 border-zinc-900 rounded-lg p-6 shadow-[0_12px_0_#18181b] transition-all duration-500 
+                    ${gameState === 'exploded' ? 'brightness-50 grayscale' : ''}
+                    ${modulesSolved.frequency ? 'border-green-900' : ''}`}
+                  >
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="font-pixel text-[8px] text-zinc-400">MOD-${modNum}: FRECUENCIA</span>
+                      <div className={`w-3 h-3 rounded-full ${modulesSolved.frequency ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-900'}`}></div>
+                    </div>
+
+                    <div className="bg-zinc-950 border-4 border-zinc-900 p-4 mb-4 rounded flex flex-col items-center justify-center">
+                      <span className="font-pixel text-[8px] text-zinc-500 mb-1">RX FREQ (MHz)</span>
+                      <span className={`font-pixel text-3xl ${gameState === 'exploded' ? 'text-zinc-800' : 'text-blue-400'}`}>
+                        {freqCurrent.toFixed(1)}
+                      </span>
+                    </div>
+
+                    <div className="flex gap-4 mb-4">
+                      <button onClick={() => handleFreqChange(-0.1)} className="flex-1 bg-zinc-700 hover:bg-zinc-600 text-white font-pixel text-[12px] py-3 border-b-4 border-zinc-900 rounded">&lt;</button>
+                      <button onClick={() => handleFreqChange(0.1)} className="flex-1 bg-zinc-700 hover:bg-zinc-600 text-white font-pixel text-[12px] py-3 border-b-4 border-zinc-900 rounded">&gt;</button>
+                    </div>
+
+                    <button 
+                      onClick={handleFreqSubmit}
+                      className="w-full bg-blue-600 hover:bg-blue-500 text-white font-pixel text-[8px] py-3 border-b-4 border-blue-900 active:translate-y-1 active:border-b-0 transition-all rounded mb-4"
+                    >
+                      SINTONIZAR
+                    </button>
+
+                    {/* INSTRUCTIONS */}
+                    {gameMode !== 'coop_online' && gameMode !== 'squad_online' && (
+                    <div className="p-3 bg-zinc-900 border-2 border-zinc-700 rounded text-[10px] text-zinc-400 font-mono">
+                      <p className="mb-2 text-zinc-300 font-bold border-b border-zinc-700 pb-1">INSTRUCCIONES:</p>
+                      <ul className="list-disc pl-4 space-y-1">
+                        <li>Si S/N tiene VOCAL: 101.5 MHz</li>
+                        <li>Si S/N termina en PAR: 88.8 MHz</li>
+                        <li>Si S/N tiene 'X': 104.2 MHz</li>
+                        <li>Otro caso: 95.5 MHz</li>
+                      </ul>
+                    </div>
+                    )}
+                  </motion.div>
+                );
+              }
+
+              if (moduleType === 'switches') {
+                return (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                    key="switches" 
+                    className={`relative w-full max-w-[320px] bg-zinc-800 border-8 border-zinc-900 rounded-lg p-6 shadow-[0_12px_0_#18181b] transition-all duration-500 
+                    ${gameState === 'exploded' ? 'brightness-50 grayscale' : ''}
+                    ${modulesSolved.switches ? 'border-green-900' : ''}`}
+                  >
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="font-pixel text-[8px] text-zinc-400">MOD-${modNum}: INTERRUPTORES</span>
+                      <div className={`w-3 h-3 rounded-full ${modulesSolved.switches ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-900'}`}></div>
+                    </div>
+
+                    <div className="flex justify-between items-center bg-zinc-700 border-4 border-zinc-900 p-4 rounded-lg mb-4">
+                      {switchesState.map((state, i) => (
+                        <div key={i} className="flex flex-col items-center gap-2">
+                          <button 
+                            onClick={() => handleSwitchToggle(i)}
+                            disabled={modulesSolved.switches || gameState !== 'playing'}
+                            className={`w-8 h-16 rounded border-4 border-zinc-900 transition-all relative overflow-hidden ${state ? 'bg-green-500' : 'bg-zinc-900'}`}
+                          >
+                            <div className={`absolute left-0 right-0 h-1/2 bg-zinc-300 transition-all ${state ? 'top-0' : 'bottom-0'}`}></div>
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+
+                    <button 
+                      onClick={handleSwitchesSubmit}
+                      className="w-full bg-zinc-600 hover:bg-zinc-500 text-white font-pixel text-[8px] py-3 border-b-4 border-zinc-900 active:translate-y-1 active:border-b-0 transition-all rounded mb-4"
+                    >
+                      VERIFICAR
+                    </button>
+
+                    {/* INSTRUCTIONS */}
+                    {gameMode !== 'coop_online' && gameMode !== 'squad_online' && (
+                    <div className="p-3 bg-zinc-900 border-2 border-zinc-700 rounded text-[10px] text-zinc-400 font-mono">
+                      <p className="mb-2 text-zinc-300 font-bold border-b border-zinc-700 pb-1">INSTRUCCIONES:</p>
+                      <ul className="list-disc pl-4 space-y-1">
+                        <li>Si S/N tiene &gt; 2 NÚMEROS: ↑ ↓ ↓ ↑ ↑</li>
+                        <li>Si S/N empieza con LETRA: ↓ ↑ ↑ ↓ ↓</li>
+                        <li>Otro caso: ↑ ↑ ↓ ↓ ↑</li>
+                      </ul>
+                    </div>
+                    )}
+                  </motion.div>
+                );
+              }
+
+              if (moduleType === 'password') {
+                return (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                    key="password" 
+                    className={`relative w-full max-w-[320px] bg-zinc-800 border-8 border-zinc-900 rounded-lg p-6 shadow-[0_12px_0_#18181b] transition-all duration-500 
+                    ${gameState === 'exploded' ? 'brightness-50 grayscale' : ''}
+                    ${modulesSolved.password ? 'border-green-900' : ''}`}
+                  >
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="font-pixel text-[8px] text-zinc-400">MOD-${modNum}: CONTRASEÑA</span>
+                      <div className={`w-3 h-3 rounded-full ${modulesSolved.password ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-900'}`}></div>
+                    </div>
+
+                    <div className="flex justify-center gap-2 mb-4">
+                      {passwordColumns.map((col, i) => (
+                        <div key={i} className="flex flex-col items-center gap-1">
+                          <button onClick={() => handlePasswordChange(i, -1)} className="w-10 h-8 bg-zinc-700 hover:bg-zinc-600 text-white font-pixel text-[10px] rounded border-b-2 border-zinc-900">▲</button>
+                          <div className="w-12 h-16 bg-zinc-950 border-4 border-zinc-900 flex items-center justify-center rounded">
+                            <span className="font-pixel text-2xl text-white">{col[passwordState[i]]}</span>
+                          </div>
+                          <button onClick={() => handlePasswordChange(i, 1)} className="w-10 h-8 bg-zinc-700 hover:bg-zinc-600 text-white font-pixel text-[10px] rounded border-b-2 border-zinc-900">▼</button>
+                        </div>
+                      ))}
+                    </div>
+
+                    <button 
+                      onClick={handlePasswordSubmit}
+                      className="w-full bg-yellow-600 hover:bg-yellow-500 text-white font-pixel text-[8px] py-3 border-b-4 border-yellow-900 active:translate-y-1 active:border-b-0 transition-all rounded mb-4"
+                    >
+                      DESCIFRAR
+                    </button>
+
+                    {/* INSTRUCTIONS */}
+                    {gameMode !== 'coop_online' && gameMode !== 'squad_online' && (
+                    <div className="p-3 bg-zinc-900 border-2 border-zinc-700 rounded text-[10px] text-zinc-400 font-mono">
+                      <p className="mb-2 text-zinc-300 font-bold border-b border-zinc-700 pb-1">INSTRUCCIONES:</p>
+                      <ul className="list-disc pl-4 space-y-1">
+                        <li>Si S/N tiene 'R': MAR</li>
+                        <li>Si S/N tiene 'S': SOL</li>
+                        <li>Si S/N tiene 'L': LUN</li>
+                        <li>Otro caso: REY</li>
+                      </ul>
+                    </div>
+                    )}
+                  </motion.div>
+                );
+              }
+
+              if (moduleType === 'button') {
+                const bColorClass = BUTTON_COLORS.find(c => c.name === buttonColor)?.class || 'bg-red-600';
+                return (
+                  <motion.div 
+                    initial={{ opacity: 0, y: 20 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: index * 0.1 }}
+                    key="button" 
+                    className={`relative w-full max-w-[320px] bg-zinc-800 border-8 border-zinc-900 rounded-lg p-6 shadow-[0_12px_0_#18181b] transition-all duration-500 
+                    ${gameState === 'exploded' ? 'brightness-50 grayscale' : ''}
+                    ${modulesSolved.button ? 'border-green-900' : ''}`}
+                  >
+                    <div className="flex justify-between items-center mb-4">
+                      <span className="font-pixel text-[8px] text-zinc-400">MOD-${modNum}: BOTÓN</span>
+                      <div className={`w-3 h-3 rounded-full ${modulesSolved.button ? 'bg-green-500 shadow-[0_0_8px_#22c55e]' : 'bg-red-900'}`}></div>
+                    </div>
+
+                    <div className="flex justify-center items-center h-32 mb-4">
+                      <button 
+                        onClick={handleButtonClick}
+                        disabled={modulesSolved.button || gameState !== 'playing'}
+                        className={`w-32 h-32 rounded-full ${bColorClass} border-8 border-zinc-900 shadow-[0_8px_0_rgba(0,0,0,0.5)] active:translate-y-2 active:shadow-none transition-all flex items-center justify-center`}
+                      >
+                        <span className={`font-pixel text-[10px] ${buttonColor === 'Blanco' || buttonColor === 'Amarillo' ? 'text-zinc-900' : 'text-white'}`}>
+                          {buttonText}
+                        </span>
+                      </button>
+                    </div>
+
+                    {/* INSTRUCTIONS */}
+                    {gameMode !== 'coop_online' && gameMode !== 'squad_online' && (
+                    <div className="p-3 bg-zinc-900 border-2 border-zinc-700 rounded text-[10px] text-zinc-400 font-mono">
+                      <p className="mb-2 text-zinc-300 font-bold border-b border-zinc-700 pb-1">INSTRUCCIONES:</p>
+                      <ul className="list-disc pl-4 space-y-1">
+                        <li>Si es ROJO: Presionar en segundo PAR</li>
+                        <li>Si dice DETONAR: Presionar en segundo IMPAR</li>
+                        <li>Otro caso: Presionar en CUALQUIER momento</li>
+                      </ul>
+                    </div>
+                    )}
+                  </motion.div>
+                );
+              }
+
               return null;
-            })}
-          </>
-        ) : (
-          /* Expert View (The Manual) */
-          <div className="w-full max-w-4xl bg-zinc-100 border-8 border-zinc-300 rounded-lg p-6 shadow-[0_12px_0_#a1a1aa] text-zinc-900 min-h-[500px]">
-            <h2 className="font-pixel text-[12px] border-b-2 border-zinc-300 pb-2 mb-6 text-center">MANUAL DE DESACTIVACIÓN AVANZADO</h2>
-            
-            <div className="grid md:grid-cols-3 gap-6">
-              {moduleOrder.map((moduleType, index) => {
-                const modNum = (index + 1).toString().padStart(2, '0');
-                
-                if (moduleType === 'wires') {
-                  const showModule = (gameMode !== 'squad' && gameMode !== 'squad_online') || coopRole === 'expert_alpha';
-                  if (!showModule) return null;
-                  return (
-                    <motion.div 
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: index * 0.1 }}
-                      key="wires" 
-                      className="space-y-4 font-mono text-xs leading-relaxed"
-                    >
-                      <div className="p-4 bg-zinc-200 rounded-lg border-l-4 border-zinc-400 h-full shadow-sm">
-                        <p className="font-bold mb-3 underline text-sm">MÓDULO {modNum}: CABLES</p>
-                        {difficulty === 'easy' && (
-                          <p>Si S/N termina en <span className="font-bold">PAR</span> &rarr; Rojo. Si no &rarr; Azul.</p>
-                        )}
-                        {difficulty === 'medium' && (
-                          <p>Si S/N tiene <span className="font-bold">LETRAS</span> &rarr; Amarillo. Si no &rarr; Verde.</p>
-                        )}
-                        {difficulty === 'hard' && (
-                          <p>Si S/N tiene <span className="font-bold">&gt;3 NÚMEROS</span> &rarr; Blanco. Si no &rarr; Amarillo.</p>
-                        )}
-                      </div>
-                    </motion.div>
-                  );
-                }
-
-                if (moduleType === 'keypad') {
-                  const showModule = (gameMode !== 'squad' && gameMode !== 'squad_online') || coopRole === 'expert_alpha';
-                  if (!showModule) return null;
-                  return (
-                    <motion.div 
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: index * 0.1 }}
-                      key="keypad" 
-                      className="space-y-4 font-mono text-xs leading-relaxed"
-                    >
-                      <div className="p-4 bg-zinc-200 rounded-lg border-l-4 border-zinc-400 h-full shadow-sm">
-                        <p className="font-bold mb-3 underline text-sm">MÓDULO {modNum}: TECLADO ULTRA</p>
-                        <p className="mb-2">Jerarquía Maestra:</p>
-                        <div className="flex flex-wrap gap-1 bg-zinc-300 p-2 rounded mb-3">
-                          {KEYPAD_HIERARCHY.map((s, i) => (
-                            <span key={i} className="text-xs bg-zinc-100 px-1 rounded border border-zinc-400">{s}</span>
-                          ))}
-                        </div>
-                        <div className="space-y-2 bg-zinc-300 p-2 rounded">
-                          <p className="font-bold border-b border-zinc-400 mb-1">REGLAS DE SECUENCIA:</p>
-                          <p>1. <span className="font-bold">ORDEN BASE:</span> Si S/N tiene <span className="font-bold">DÍGITO PAR</span> &rarr; Ascendente. Else &rarr; Descendente.</p>
-                          <p>2. <span className="font-bold">DESPLAZAMIENTO:</span> Si S/N tiene <span className="font-bold">VOCAL</span> &rarr; Rotar secuencia 1 pos. a la derecha.</p>
-                          <p>3. <span className="font-bold">PARADOJA:</span> Si S/N tiene <span className="font-bold">&gt;2 LETRAS</span> &rarr; Intercambiar 1er y 6to símbolo.</p>
-                        </div>
-                      </div>
-                    </motion.div>
-                  );
-                }
-
-                if (moduleType === 'simon') {
-                  const showModule = (gameMode !== 'squad' && gameMode !== 'squad_online') || coopRole === 'expert_beta';
-                  if (!showModule) return null;
-                  return (
-                    <motion.div 
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: index * 0.1 }}
-                      key="simon" 
-                      className="space-y-4 font-mono text-xs leading-relaxed"
-                    >
-                      <div className="p-4 bg-zinc-200 rounded-lg border-l-4 border-zinc-400 h-full shadow-sm">
-                        <p className="font-bold mb-3 underline text-sm">MÓDULO {modNum}: SIMON</p>
-                        <p className="mb-2">Traduzca el color que parpadea:</p>
-                        <div className="space-y-2">
-                          <div className="bg-zinc-300 p-2 rounded">
-                            <p className="font-bold border-b border-zinc-400 mb-1">Si S/N tiene VOCAL:</p>
-                            <p>Rojo &rarr; Azul | Azul &rarr; Rojo</p>
-                            <p>Verde &rarr; Amar | Amar &rarr; Verde</p>
-                          </div>
-                          <div className="bg-zinc-300 p-2 rounded">
-                            <p className="font-bold border-b border-zinc-400 mb-1">Si NO tiene VOCAL:</p>
-                            <p>Rojo &rarr; Amar | Azul &rarr; Verde</p>
-                            <p>Verde &rarr; Azul | Amar &rarr; Rojo</p>
-                          </div>
-                        </div>
-                      </div>
-                    </motion.div>
-                  );
-                }
-
-                if (moduleType === 'frequency') {
-                  const showModule = (gameMode !== 'squad' && gameMode !== 'squad_online') || coopRole === 'expert_beta';
-                  if (!showModule) return null;
-                  return (
-                    <motion.div 
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: index * 0.1 }}
-                      key="frequency" 
-                      className="space-y-4 font-mono text-xs leading-relaxed"
-                    >
-                      <div className="p-4 bg-zinc-200 rounded-lg border-l-4 border-zinc-400 h-full shadow-sm">
-                        <p className="font-bold mb-3 underline text-sm">MÓDULO {modNum}: SINTONIZADOR</p>
-                        <p className="mb-2 font-bold">Frecuencia (MHz) = 80.0 + [BASE] + [MOD]</p>
-                        <div className="space-y-2">
-                          <div className="bg-zinc-300 p-2 rounded">
-                            <p className="font-bold border-b border-zinc-400 mb-1">[BASE]:</p>
-                            <p>Si S/N empieza con LETRA &rarr; 10.5</p>
-                            <p>Si S/N empieza con NÚMERO &rarr; 15.0</p>
-                          </div>
-                          <div className="bg-zinc-300 p-2 rounded">
-                            <p className="font-bold border-b border-zinc-400 mb-1">[MOD]:</p>
-                            <p>Por cada VOCAL en S/N: +1.2</p>
-                            <p>Si S/N tiene &gt;3 NÚMEROS: -2.5</p>
-                            <p>Si no: +3.0</p>
-                          </div>
-                        </div>
-                      </div>
-                    </motion.div>
-                  );
-                }
-
-                if (moduleType === 'morse') {
-                  const showModule = (gameMode !== 'squad' && gameMode !== 'squad_online') || coopRole === 'expert_gamma';
-                  if (!showModule) return null;
-                  return (
-                    <motion.div 
-                      initial={{ opacity: 0, y: 20 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: index * 0.1 }}
-                      key="morse" 
-                      className="space-y-4 font-mono text-xs leading-relaxed"
-                    >
-                      <div className="p-4 bg-zinc-200 rounded-lg border-l-4 border-zinc-400 h-full shadow-sm">
-                        <p className="font-bold mb-3 underline text-sm">MÓDULO {modNum}: CÓDIGO MORSE</p>
-                        <p className="mb-2">Identifique la palabra y sintonice:</p>
-                        <div className="grid grid-cols-2 gap-x-4 gap-y-1 bg-zinc-300 p-2 rounded">
-                          {MORSE_WORDS.map((m, i) => (
-                            <div key={i} className="flex justify-between border-b border-zinc-400/30">
-                              <span className="font-bold">{m.word}</span>
-                              <span>{m.freq} MHz</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    </motion.div>
-                  );
-                }
-                return null;
-              })}
-            </div>
-            {(gameMode === 'squad' || gameMode === 'squad_online' || gameMode === 'coop' || gameMode === 'coop_online') && (coopRole === 'expert_gamma' || coopRole === 'expert') && (
-              <motion.div 
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                transition={{ delay: 0.5 }}
-                className="mt-6 p-4 bg-zinc-800 text-zinc-100 rounded-lg border-4 border-zinc-900 font-mono text-xs shadow-md"
-              >
-                <p className="font-bold text-red-400 mb-2 underline uppercase">Información Global (S/N):</p>
-                <p className="text-zinc-400">Número de Serie: <span className="text-white font-bold">{serialNumber}</span></p>
-                <div className="mt-2 space-y-1 text-[10px]">
-                  <p>- Vocales: {serialNumber.match(/[AEIOU]/g)?.length || 0}</p>
-                  <p>- Dígitos: {serialNumber.match(/\d/g)?.length || 0}</p>
-                  <p>- Letras: {serialNumber.match(/[A-Z]/g)?.length || 0}</p>
-                </div>
-              </motion.div>
-            )}
-            <motion.p 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 0.6 }}
-              className="italic text-red-500 font-bold mt-8 text-center text-xs"
-            >
-              ¡ADVERTENCIA: Un error en cualquier módulo provocará la explosión!
-            </motion.p>
-          </div>
-        )}
+            });
+          })()}
+        </div>
       </div>
-
       <div className="mt-8 flex flex-col items-center gap-4">
         {gameState !== 'playing' && (
           <motion.div 
